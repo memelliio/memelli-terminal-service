@@ -1,4 +1,4 @@
-// Universal team shell — plain JS, no TS compilation, no legacy.
+// Universal team shell - plain JS, no TS compilation, no legacy.
 // SCHEMA env var picks which DB schema's nodes to load.
 const fastify = require('fastify');
 const { Client } = require('pg');
