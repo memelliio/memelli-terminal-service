@@ -42,6 +42,10 @@ async function main() {
   await mod.exports.register(app, helpers);
   await helpers.markStatus('_shell_orchestrator', 'deployed');
   console.log('[shell] booted, schema=' + SCHEMA);
+
+  const port = parseInt(process.env.PORT || '3000', 10);
+  await app.listen({ port, host: '0.0.0.0' });
+  console.log('[shell] listening on 0.0.0.0:' + port);
 }
 
 main().catch(err => { console.error(err); process.exit(1); });
