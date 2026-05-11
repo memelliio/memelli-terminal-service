@@ -1,5 +1,4 @@
-// Universal team shell - plain JS, no TS compilation, no legacy.
-// SCHEMA env var picks which DB schema's nodes to load.
+// Universal team shell - DB-resilient boot
 const fastify = require('fastify');
 const { Client } = require('pg');
 
@@ -7,45 +6,51 @@ async function main() {
   const dbUrl = process.env.DATABASE_URL;
   const SCHEMA = process.env.SCHEMA || 'kernel';
   const client = new Client({ connectionString: dbUrl });
-  await client.connect();
+  let dbOk = false;
+  let dbErr = null;
+  try { await client.connect(); dbOk = true; }
+  catch (e) { dbErr = String(e.message).slice(0, 200); console.error('[boot] DB connect failed, starting DEGRADED:', dbErr); }
 
   const helpers = {
     client,
     schema: SCHEMA,
+    db_ok: dbOk,
     async markStatus(name, status, errorText = '') {
-      await client.query(
-        `UPDATE ${SCHEMA}.nodes SET status=$1, last_loaded_at=now(), error_text=$2, load_count=load_count+1 WHERE name=$3`,
-        [status, errorText, name]
-      );
+      if (!dbOk) return;
+      try { await client.query(, [status, errorText, name]); } catch (e) {}
     },
   };
 
   const app = fastify();
   app.__schema = SCHEMA;
+  app.get('/__health', async () => ({ ok: true, schema: SCHEMA, db: dbOk, db_error: dbErr, mode: dbOk ? 'full' : 'degraded', service: process.env.RAILWAY_SERVICE_NAME, ts: new Date().toISOString() }));
 
-  let res = await client.query(
-    `SELECT code_text FROM ${SCHEMA}.nodes WHERE name='_shell_orchestrator' AND active=true AND (status='deployed' OR status='pending') ORDER BY version DESC LIMIT 1`
-  );
-  if (res.rowCount === 0) {
-    res = await client.query(
-      `SELECT code_text FROM ${SCHEMA}.nodes WHERE name='_shell_orchestrator' ORDER BY version DESC LIMIT 1`
-    );
+  if (dbOk) {
+    try {
+      let res = await client.query();
+      if (res.rowCount === 0) {
+        res = await client.query();
+      }
+      const code = res.rows[0]?.code_text;
+      if (code) {
+        await helpers.markStatus('_shell_orchestrator', 'deploying');
+        const mod = { exports: {} };
+        const fn = new Function('module', 'exports', 'require', 'app', 'helpers', code);
+        fn(mod, mod.exports, require, app, helpers);
+        if (typeof mod.exports.register === 'function') {
+          await mod.exports.register(app, helpers);
+          await helpers.markStatus('_shell_orchestrator', 'deployed');
+          console.log('[shell] booted, schema=' + SCHEMA);
+        }
+      }
+    } catch (e) { console.error('[shell] orchestrator load failed:', e.message); }
+  } else {
+    console.log('[shell] DEGRADED mode — DB unavailable, only /__health responds');
   }
-  const code = res.rows[0]?.code_text;
-  if (!code) throw new Error('No orchestrator code found in schema ' + SCHEMA);
-
-  await helpers.markStatus('_shell_orchestrator', 'deploying');
-  const mod = { exports: {} };
-  const fn = new Function('module', 'exports', 'require', 'app', 'helpers', code);
-  fn(mod, mod.exports, require, app, helpers);
-  if (typeof mod.exports.register !== 'function') throw new Error('orchestrator did not export register');
-  await mod.exports.register(app, helpers);
-  await helpers.markStatus('_shell_orchestrator', 'deployed');
-  console.log('[shell] booted, schema=' + SCHEMA);
 
   const port = parseInt(process.env.PORT || '3000', 10);
   await app.listen({ port, host: '0.0.0.0' });
-  console.log('[shell] listening on 0.0.0.0:' + port);
+  console.log('[shell] listening on 0.0.0.0:' + port + (dbOk ? ' full' : ' degraded'));
 }
 
-main().catch(err => { console.error(err); process.exit(1); });
+main().catch(err => { console.error('[fatal]', err); process.exit(1); });
